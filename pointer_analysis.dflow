@@ -1,0 +1,423 @@
+prolog
+{
+/* file "pointer_analysis.dflow" */
+
+
+#include <suif1.h>
+#include "main.h"
+#include "pointerinfo.h"
+#include "fg.h"
+
+};
+
+Pointer_analysis: Sprob_switches =
+
+problem:
+{
+
+private:
+  fg *cfg;
+
+public:
+
+  Pointer_analysis(fg *g);
+
+  inline int set_size()               { return cfg->pointerass_num(); }
+  inline int get_pointerass_index(instruction *i) { return cfg->get_pointerass_index(i); }
+  inline instruction *get_pointerass(int i)           { return cfg->get_pointerass(i); }
+  boolean is_pure(var_sym *v)   { return cfg->is_pure(v); }
+};
+
+flow_map:
+{
+  Pointer_analysis_L *l;
+  /* map each node to a flow function */
+  switch(_N->kind())
+    {
+    case NODE_SOURCE:
+      l=new Pa_source;
+      break;
+
+    case NODE_SINK:
+      l=new Pa_sink;
+      break;
+
+    case NODE_INSTR:
+      {
+  instruction *inst = _N->instr();
+	switch(inst->format())
+	  {
+	  case inf_rrr:
+	    {
+	      switch(inst->opcode())
+		{
+                case io_cpy:
+		  l=new Pa_cpy;
+		  break;
+
+		case io_lod:
+		  l=new Pa_lod;
+		  break;
+
+		default:
+		  l=new Pa_rrr;
+		  break;
+		}
+	    }
+	    break;
+
+#ifndef HAWG4
+	  case inf_bj:
+	    l=new Pa_bj;
+	    break;
+#endif
+
+#ifdef HAWG4
+	  case inf_cvt:
+	    l=new Pa_cvt;
+	    break;
+#endif
+
+	  case inf_ldc:
+	    l=new Pa_ldc;
+	    break;
+
+	  case inf_cal:
+	    l=new Pa_cal;
+	    break;
+
+	  case inf_array:
+	    l=new Pa_array;
+	    break;
+
+	  case inf_mbr:
+	    l=new Pa_mbr;
+	    break;
+
+	  case inf_none:
+	  case inf_lab:
+	    l=new Pa_identity;
+	    break;
+
+	  case inf_gen:
+	    l=new Pa_gen;
+	    break;
+	  }
+      }
+      break;
+
+    case NODE_FOR_LOOP:
+      l=new Pa_for_loop;
+      break;
+
+    case NODE_PRE_TEST:
+      l=new Pa_pre_test;
+      break;
+
+    case NODE_LABEL:
+    case NODE_LOOP:
+    case NODE_IF:
+    case NODE_BLOCK:
+      l=new Pa_identity;
+      break;
+    }
+  l->P = this;
+  return l;
+};
+
+node_base: fg_node {};
+
+value_base:
+{
+private:
+  Pointer_analysis *P;
+  bit_set pointerass;
+  bit_set_iter iterator;
+
+public:
+  Pointer_analysis_V(Pointer_analysis *p);
+  void mk_empty()          { pointerass.clear(); }
+  instruction* get_pointerass(int i)      { return P->get_pointerass(i); }
+  void operator+= (Pointer_analysis_V &r) { pointerass += r.pointerass; }
+
+  void add(instruction *in)
+    {
+       operand op = in->dst_op(); 
+       if(op.kind()==OPER_SYM))
+         {
+           sym_node *sn = op.symbol();
+           if(sn->kind()==SYM_VAR)
+              {
+                var_sym *vs = (var_sym *)sn;
+                type_node *tn = vs->type();
+                if(tn->is_ptr())
+                  {
+                    int i = P->get_pointerass_index(in);
+                    if(i>=0)
+	            pointerass.add(i);
+                  }
+              }
+          }
+    }
+
+
+  void kill(instruction *the_instr) 
+    {
+      operand o = the_instr->dst_op();
+      if(o.kind()==OPER_SYM)
+       {
+       sym_node *sn = o.symbol();
+       if(sn->kind()==SYM_VAR)
+        {
+        var_sym *vs = (var_sym *)sn;
+        for(int i=0;i<(P->pointerass_num());i++)
+           {
+            instruction *in = P->get_pointerass(i);
+            operand op = in->dst_op();
+            var_sym *vsi = (var_sym *)(op.symbol());  /*The structure have been fixed by the collect_pointerass*/
+            if(vsi==vs)
+              {
+                int j = P->get_pointerass_index(in);
+                if(j>=0)
+	        pointerass.remove(j);
+              }
+           }
+         } 
+       }
+     }
+
+  int test_and_copy(Pointer_analysis_V *r)
+    {
+      if(pointerass==r->pointerass)
+	return 0;
+      else
+	{
+	  pointerass = r->pointerass;
+	  return 1;
+	}
+    }
+
+  void kill_pointerass(bit_set *iset) { *iset -= pointerass; }
+
+  /* iterate through the set of pointer assignments */
+  void reset_iter()  { iterator.reset(&pointerass); }
+  int is_empty()     { return iterator.is_empty(); }
+  instruction *next_pointerass(){ return P->get_pointerass(iterator.step()); }
+};
+
+flow_base:
+{
+    void out_action(Snode *,Svar *);
+};
+
+new_var:
+{
+  return new Pointer_analysis_V(this);
+}
+;
+
+copy_var:
+{
+  return _DST->test_and_copy(_SRC);
+}
+;
+
+meet:
+{
+  int i;
+  _DST->mk_empty();
+  for(i=0; i<_NSRCS; i++)
+      *_DST += *_SRCS[i];
+}
+;
+
+Pa_source:
+flow_function
+{
+}
+;
+
+Pa_sink:
+flow_function
+{
+}
+;
+
+Pa_rrr:
+flow_function
+{
+
+}
+process_function
+{
+    in_rrr *in = (in_rrr *) _N->instr();
+    immed_list *list = new immed_list;
+    array_instr_list *ail = new array_instr_list;
+    find_array_instr(in,ail);
+    array_instr_list_iter aili(ail);
+      while(!aili.is_empty())
+       {
+        int i=0;
+        in_array *ia_to_be_processed = aili.step();
+        var_sym *vs_to_be_processed = get_sym_of_array(ia_to_be_processed);
+        var_sym *vs_ass_n;
+        instruction *pointer_ass_n;
+        if(P->is_pure(vs_to_be_processed))
+        continue;
+        
+        _V->reset_iter();
+        while(!_V->is_empty())
+           {             
+             instruction *pointer_ass = _V->next_pointerass();
+             operand op_ass = pointer_ass->dst_op();
+             var_sym *vs_ass = (var_sym *)(op_ass.symbol());
+             if(vs_ass==vs_to_be_processed)
+             {i++; vs_ass_n = vs_ass;pointer_ass_n = pointer_ass;}
+           } 
+        if(i==1)
+        {in_array *alias_array = trace_to_upper_pointer(ia_to_be_processed,pointer_ass_n);
+          if(alias_array)&&(ia_to_be_processed))
+            {
+              list->append(immed(alias_array));
+              ia_to_be_processed->append_annote(k_alias,list);
+              list->clear();
+            }
+
+         }
+       
+       }  
+}
+;
+
+
+Pa_lod:
+flow_function
+{
+  in_rrr *in = (in_rrr *) _N->instr();
+  _V->kill(in);
+  _V->add(in);
+}
+process_function
+{
+
+}
+;
+
+
+Pa_cpy:
+flow_function
+{
+  in_rrr *in = (in_rrr *) _N->instr();
+  _V->kill(in);
+  _V->add(in);
+}
+;
+
+
+Pa_bj:
+flow_function
+{
+
+};
+
+Pa_cvt:
+flow_function
+{
+
+}
+;
+
+Pa_ldc:
+flow_function
+{
+
+}
+;
+
+Pa_cal:
+flow_function
+{
+
+}
+;
+
+Pa_gen:
+flow_function
+{
+
+}
+;
+
+Pa_array:
+flow_function
+{
+  int i;
+  in_array *in = (in_array *) _N->instr();
+
+  _V->kill(in);
+  _V->add(in);
+
+}
+;
+
+Pa_mbr:
+flow_function
+{
+
+}
+;
+
+Pa_identity:
+flow_function
+{
+}
+;
+
+Pa_for_loop:
+flow_function
+{
+}
+;
+
+Pa_pre_test:
+flow_function
+{
+
+};
+
+end;
+
+insert {
+
+Pointer_analysis::Pointer_analysis(fg *g)
+   :Sprob_switches(g->forward_graph,1)
+
+{
+  cfg = g;
+}
+
+Pointer_analysis_V::Pointer_analysis_V(Pointer_analysis *p):pointerass(0,p->set_size())
+{
+  P=p;
+}
+
+void Pointer_analysis_L::out_action(Snode *__N, Svar *__V)
+{
+#if 0
+    instruction *in = ((Pointer_analysis_S *)__N)->instr();
+    Pointer_analysis_V *_V = (Pointer_analysis_V *)__V;
+    immed_list *list = new immed_list;
+
+    _V->reset_iter();
+    while(!_V->is_empty())
+      list->append(immed(_V->next_var(),0));
+      
+    if(in)
+      in->append_annote(k_live,list);
+    else
+      delete list;
+#endif
+}
+
+};
+
